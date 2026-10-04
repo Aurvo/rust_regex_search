@@ -11,10 +11,12 @@ fn main() {
         println!("{args_usage_msg}");
         return;
     };
-    let Some(file_str) = args.get(2) else {
+    let Some(raw_file_str) = args.get(2) else {
         println!("{args_usage_msg}");
         return;
     };
+
+    let file_str = raw_file_str.to_lowercase();
 
     let Ok(root_path) = current_dir() else {
         println!("Could not determine working directory.");
@@ -29,7 +31,7 @@ fn main() {
     let sequence = sequence_result.expect("just confirmed it's OK");
 
     let file_name_matcher_box;
-    match determine_matcher_strategy(file_str.to_string()) {
+    match determine_matcher_strategy(file_str) {
         Ok(matcher_box) => file_name_matcher_box = matcher_box,
         Err(msg) => {
             println!("{msg}");
@@ -54,7 +56,7 @@ fn determine_matcher_strategy(matcher_str: String) -> Result<Box<dyn Fn(&str) ->
     }
 
     let Some(ast_pose) = ast_pose_opt else {
-        return Ok(Box::new(move |fname: &str| fname == matcher_str));
+        return Ok(Box::new(move |fname: &str| fname.to_lowercase() == matcher_str));
     };
     if matcher_str == "*" {
         return Ok(Box::new(|_| true))
@@ -71,10 +73,10 @@ fn determine_matcher_strategy(matcher_str: String) -> Result<Box<dyn Fn(&str) ->
         String::new()
     };
     let does_str_match_start = move |fname: &str| {
-        fname.len() >= starting_str.len() && fname[..starting_str.len()] == starting_str
+        fname.len() >= starting_str.len() && fname[..starting_str.len()].to_lowercase() == starting_str
     };
     let does_str_match_end = move |fname: &str| {
-        fname.len() >= ending_str.len() && fname[fname.len() - ending_str.len()..] == ending_str
+        fname.len() >= ending_str.len() && fname[fname.len() - ending_str.len()..].to_lowercase() == ending_str
     };
 
     if ast_pose == 0 {
