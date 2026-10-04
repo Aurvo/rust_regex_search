@@ -1,5 +1,5 @@
 # NGREP
-Searches the current working directory and any subdirectories for files whose names match certain text and outputs all lines in those files that match a regular expression. Includes line numbers.
+Searches the current working directory and any subdirectories for files whose names match certain text and outputs all lines in those files that match a regular expression. Includes line numbers. This project uses its own regular epression matching algorithm.
 
 I made this project to help myself learn Rust. It's not menat to be optimal in any way. Nor is it meant to be fully featured.
 
