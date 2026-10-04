@@ -1,4 +1,4 @@
-use std::{collections::LinkedList, env::{self, current_dir}, fs::{ReadDir, read_dir, read_to_string}, path::PathBuf};
+use std::{collections::LinkedList, env::{self, current_dir}, fs::{File, ReadDir, read_dir}, io::{BufRead, BufReader}, path::PathBuf};
 
 use crate::patterns::{SequenceExpr, form_expression_tree, test_sequence};
 
@@ -16,21 +16,10 @@ fn main() {
         return;
     };
 
-    let root_path: PathBuf;
-    if file_str.starts_with('.') {
-        let Ok(mut full_path) = current_dir() else {
-            println!("Could not deterine current working directory. Maybe try an absolute path?");
-            return;
-        };
-        full_path.push(file_str);
-        root_path = full_path;
-    } else {
-        root_path = PathBuf::from(file_str);
-    }
-    if !root_path.is_dir() {
-        println!("Not a directory: {file_str}");
+    let Ok(root_path) = current_dir() else {
+        println!("Could not determine working directory.");
         return;
-    }
+    };
 
     let sequence_result = form_expression_tree(&regex);
     if let Err(err_msg) = sequence_result {
@@ -39,21 +28,67 @@ fn main() {
     }
     let sequence = sequence_result.expect("just confirmed it's OK");
 
-    let matching_file_strs = test_sequence_on_files(root_path, sequence);
-
-    println!("\nMatching File Paths:");
-
-    if matching_file_strs.is_empty() {
-        println!("No matches");
-        return;
+    let file_name_matcher_box;
+    match determine_matcher_strategy(file_str.to_string()) {
+        Ok(matcher_box) => file_name_matcher_box = matcher_box,
+        Err(msg) => {
+            println!("{msg}");
+            return;
+        }
     }
-    for file_path_str in matching_file_strs {
-        println!("{file_path_str}");
-    }
+
+    test_sequence_on_files(root_path, sequence, &file_name_matcher_box.as_ref());
 }
 
-fn test_sequence_on_files(root_path: PathBuf, sequence: SequenceExpr) -> LinkedList<String> {
-    let mut path_names: LinkedList<String> = LinkedList::new();
+fn determine_matcher_strategy(matcher_str: String) -> Result<Box<dyn Fn(&str) -> bool>, String> {
+    // Trying not to use existing rust regex utilities, which includes str.split().
+    // Will need to implement split ourselves.    
+    let mut ast_pose_opt: Option<usize> = None;
+    for (byte_pose, ch) in matcher_str.char_indices() {
+        if ch == '*' {
+            match ast_pose_opt {
+                Some(_) => return Err(String::from("Multiple *s in file name matcher text not supported.")),
+                None => ast_pose_opt = Some(byte_pose)
+            }
+        }
+    }
+
+    let Some(ast_pose) = ast_pose_opt else {
+        return Ok(Box::new(move |fname: &str| fname == matcher_str));
+    };
+    if matcher_str == "*" {
+        return Ok(Box::new(|_| true))
+    }
+    // Note: size_of_val(&'*') is 4 like it is for any char.
+    // We're not looking for htat size, here. We're looking for ths size a '*' character
+    // takes up in a string slize.
+    let size_of_ast = "*".len();
+    let ending_str_start = ast_pose + size_of_ast;
+    let starting_str = (&matcher_str)[..ast_pose].to_string();
+    let ending_str = if ending_str_start < matcher_str.len() {
+        (&matcher_str)[ending_str_start..].to_string()
+    } else {
+        String::new()
+    };
+    let does_str_match_start = move |fname: &str| {
+        fname.len() >= starting_str.len() && fname[..starting_str.len()] == starting_str
+    };
+    let does_str_match_end = move |fname: &str| {
+        fname.len() >= ending_str.len() && fname[fname.len() - ending_str.len()..] == ending_str
+    };
+
+    if ast_pose == 0 {
+        return Ok(Box::new(does_str_match_end));
+    } else if ast_pose == matcher_str.len() - size_of_ast {
+        return Ok(Box::new(does_str_match_start));
+    }
+    return Ok(Box::new(move |fname: &str| {
+        does_str_match_start(fname) && does_str_match_end(fname)
+    }
+    ));
+}
+
+fn test_sequence_on_files(root_path: PathBuf, sequence: SequenceExpr, does_file_name_match: &impl Fn(&str) -> bool) {
     let mut directory_queue: LinkedList<PathBuf> = LinkedList::new();
     directory_queue.push_back(root_path);
     let mut cur_dir_path: PathBuf;
@@ -67,69 +102,34 @@ fn test_sequence_on_files(root_path: PathBuf, sequence: SequenceExpr) -> LinkedL
             child_path = entry.path();
             // possible both is_file() and is_dir() return false
             if child_path.is_file() {
-                let Ok(contents) = read_to_string(&child_path) else {continue};
-                if test_sequence(contents.as_str(), &sequence) {
-                    path_names.push_back(child_path.into_string()
-                        .unwrap_or(String::from("<unknown_path>")));
-                }
+                print_matching_lines_in_file(child_path, &sequence, does_file_name_match);
             } else if child_path.is_dir() {
                 directory_queue.push_back(child_path);
             }
         }
     }
-    return path_names;
 }
 
-// File Name Matching Strategies
+fn print_matching_lines_in_file(file_path: PathBuf, sequence: &SequenceExpr, does_file_name_match: &impl Fn(&str) -> bool) {
+    let Some(Some(file_name)) = file_path.file_name().map(|s| s.to_str()) else {return};
+    if !does_file_name_match(file_name) {return}
 
-trait FileNameMatchingStrategy {
-    fn does_match(&self, file_name: &str) -> bool;
-}
+    let Some(file_path_str) = file_path.to_str().map(|s| s.to_string()) else {return};
+    let Ok(file) = File::open(file_path) else {return};
+    let reader = BufReader::new(file);
 
-struct DirectFileMatchingStrategy {
-    file_name: String
-}
-
-impl FileNameMatchingStrategy for DirectFileMatchingStrategy {
-    fn does_match(&self, file_name: &str) -> bool {
-        self.file_name == file_name
+    let mut printed_file_path = false;
+    let mut line_num: u32 = 0;
+    for line_result in reader.lines() {
+        line_num += 1;
+        let Ok(line) = line_result else {break};
+        if !test_sequence(&line, sequence) {continue}
+        if !printed_file_path {
+            println!("{file_path_str}");
+            println!("{:<10}{}", "LINE NUM", "LINE TEXT");
+            printed_file_path = true;
+        }
+        println!("{line_num:<10}{line}")
     }
-}
-
-struct StartsWithFileMatchingStrategy {
-    file_name_start: String
-}
-
-impl FileNameMatchingStrategy for StartsWithFileMatchingStrategy {
-    fn does_match(&self, file_name: &str) -> bool {
-        // trying not to use existing rust regex functinolaity, so can't use
-        // str.starts_with, which accepts a rust Pattern ref
-        file_name.len() >= self.file_name_start.len() &&
-            &file_name[..self.file_name_start.len()] == file_name
-    }
-}
-
-struct EndsWithFileMatchingStrategy {
-    file_name_end: String
-}
-
-impl FileNameMatchingStrategy for EndsWithFileMatchingStrategy {
-    fn does_match(&self, file_name: &str) -> bool {
-        // trying not to used existing rust regex functinolaity, so can't use
-        // str.ends_with, which accepts a rust Pattern ref
-        file_name.len() >= self.file_name_end.len() &&
-            &file_name[file_name.len() - self.file_name_end.len()..] == file_name
-    }
-}
-
-struct StartsWithAndEndsWithFileSyptStrategy {
-    starts_with_strategy: StartsWithFileMatchingStrategy,
-    ends_with_strategy: EndsWithFileMatchingStrategy
-}
-
-impl FileNameMatchingStrategy for StartsWithAndEndsWithFileSyptStrategy {
-    fn does_match(&self, file_name: &str) -> bool {
-        self.starts_with_strategy.does_match(file_name) &&
-            self.ends_with_strategy.does_match(file_name)
-    }
+    if printed_file_path {println!()}
 }
